@@ -18,8 +18,8 @@ DEVICE: [0]
 # The following are training settings
 #####################################
 TRAIN:
-  # Model stage. Optional: "vae", "diffusion"
-  STAGE: diffusion
+  # Model stage. Optional: "vae", "diffusion", "GAN"
+  STAGE: GAN
   # Training dataset name
   DATASETS: ['kit']
   # Number of dataloader workers
@@ -52,7 +52,7 @@ EVAL:
 # The following are testing settings
 #####################################
 TEST:
-  CHECKPOINTS: "experiments/mld/1222_PELearn_Diff_Latent1_MEncDec49_MdiffEnc49_bs64_clip_uncond75_01/checkpoints/epoch=1199.ckpt" #./checkpoints/mld_kit_checkpoint/1222_mld_kit_FID041.ckpt # Pretrained model path
+  CHECKPOINTS: ./checkpoints/mld_kit_checkpoint/1222_mld_kit_FID041.ckpt # Pretrained model path
   DATASETS: ['kit'] # training datasets
   SPLIT: test
   BATCH_SIZE: 1 # training Batch size
@@ -91,7 +91,7 @@ LOSS:
 #####################################
 model:
   vae: true # whether vae model
-  model_type: mld # model type
+  model_type: GAN # model type
   condition: 'text'
   latent_dim: [1, 256] # latent dimension
   ff_size: 1024 #
