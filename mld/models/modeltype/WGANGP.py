@@ -16,9 +16,7 @@ from mld.models.architectures import (
     t2m_motionenc,
     t2m_textenc,
     vposert_vae,
-    wgan_architecture,  # Import the basic WGAN, 
-    wgan_dense,  # import the dense WGAN
-    wmlp_gan  # mlp WGAN
+    wgangp_basic,  # Import the GAN
 )
 from mld.models.losses.mld import MLDLosses
 from mld.models.modeltype.base import BaseModel
@@ -34,10 +32,10 @@ import torch.utils.data
 
 
 
-class WGAN(BaseModel):
+class WGANGP(BaseModel):
     """
     Stage 1 vae
-    Stage 2 diffusion/WGAN
+    Stage 2 wgan
     """
 
     def __init__(self, cfg, datamodule, **kwargs):
@@ -59,6 +57,7 @@ class WGAN(BaseModel):
         self.datamodule = datamodule
         self.noise_dim = 100
         self.text_emb_dim = 768
+        #self.automatic_optimization = False
                 
         print(self.latent_dim)
 
@@ -74,17 +73,12 @@ class WGAN(BaseModel):
             self.vae = instantiate_from_config(cfg.model.motion_vae)
 
         # Don't train the motion encoder and decoder
-        if self.stage == "WGAN":
-            print("WGAN")
+        if self.stage == "WGANGP":
             if self.arch_type == "simple":
-                self.gan = wgan_architecture.CGAN(self.noise_dim, self.text_emb_dim , self.latent_dim[-1])  # text emb dim = 768
-            elif self.arch_type == "mlp":
-                self.gan = wmlp_gan.CGAN(self.noise_dim, self.text_emb_dim , self.latent_dim[-1])  # text emb dim = 768
-            elif self.arch_type == "dense":
-                self.gan = wgan_dense.CGAN(self.noise_dim, self.text_emb_dim , self.latent_dim[-1])  # text emb dim = 768
+                self.gan = wgangp_basic.WGAN(self.noise_dim, self.text_emb_dim , self.latent_dim[-1])  # text emb dim = 768
             else:
-                raise Exception("Invalid architecture type for the stage WGAN")
-
+                raise Exception('Invalid architecture type for stage WGANGP')
+            
             if self.vae_type in ["mld", "vposert","actor"]:
                 self.vae.training = False
                 for p in self.vae.parameters():
@@ -259,7 +253,7 @@ class WGAN(BaseModel):
             motions = batch['motion']
             z, dist_m = self.vae.encode(motions, lengths)
             
-        elif self.stage=="WGAN":
+        elif self.stage=="WGANGP":
                         
             text_emb = self.text_encoder(texts)
             
@@ -555,13 +549,11 @@ class WGAN(BaseModel):
         }
         return rs_set
 
-    def train_gan_forward(self, batch):
+    def train_gan_forward(self, batch, optimizer_idx = 0):
         
         motions = batch['motion']
         texts = batch["text"]
         lengths = batch["length"]
-        
-        
         
         # Encode the real motion data using the VAE encoder
         with torch.no_grad():
@@ -572,7 +564,6 @@ class WGAN(BaseModel):
             else:
                 raise TypeError("vae_type must be mld, vposert, actor, or no")
 
-
         # Sample Gaussian noise
         
         # Get text embeddings
@@ -580,16 +571,13 @@ class WGAN(BaseModel):
         
         noise = torch.randn((len(texts), self.noise_dim), device=cond_emb.device, dtype=torch.float)
                 
-        
-        
         # Generate fake latent space using the generator
         fake_latent = self.gan(noise, cond_emb)
         
         # Train the GAN
+        #print('real lt, fake lt', real_latent.shape, fake_latent.shape, noise.shape, cond_emb.shape)
         generator_loss = self.gan.generator_step(noise, cond_emb)
-        discriminator_loss = self.gan.discriminator_step(noise, real_latent, cond_emb)
-
-
+        discriminator_loss = self.gan.discriminator_step(fake_latent, real_latent, cond_emb)
          
         return {
                 "real_latent": real_latent,
@@ -598,7 +586,20 @@ class WGAN(BaseModel):
                 "generator_loss": generator_loss,
             }
                 
-                
+    def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_idx,
+                   optimizer_closure, on_tpu, using_lbfgs):
+        #print('inside opt step', optimizer_closure)
+        if optimizer_idx == 0:
+            if ((batch_idx + 1) % 10) == 0:
+                #print('inside gen opt')
+                optimizer.step(closure = optimizer_closure)
+            else:
+                optimizer_closure()
+        elif optimizer_idx == 1:
+            #print('inside disc opt')
+            optimizer.step(closure = optimizer_closure)
+            #self.clip_gradients(optimizer, gradient_clip_val=0.001, gradient_clip_algorithm="norm")
+
     def test_gan_forward(self, batch):
         
         motions = batch['motion']
@@ -611,9 +612,6 @@ class WGAN(BaseModel):
         cond_emb = self.text_encoder(texts)
         
         noise = torch.randn((len(texts), self.noise_dim), device=cond_emb.device, dtype=torch.float)
-        
-       
-
         
         fake_latent = self.gan(noise, cond_emb).unsqueeze(0)
 
@@ -639,22 +637,18 @@ class WGAN(BaseModel):
     
 
     def training_step(self, batch, batch_idx, optimizer_idx):
-        
-        clip_value = 0.01
-        
-        gan_rs_set = self.train_gan_forward(batch)
+        gan_rs_set = self.train_gan_forward(batch, optimizer_idx)
         d_loss = gan_rs_set["discriminator_loss"]
         g_loss = gan_rs_set["generator_loss"]
+
+        #comment for bce loss
+        #torch.nn.utils.clip_grad_norm(self.parameters(), max_norm = 0.01)
         
         if optimizer_idx == 0:
-            self.log("g_loss", g_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)        
+            self.log("g_loss", g_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
             return g_loss
         
         if optimizer_idx == 1:
-            for p in self.gan.discriminator.parameters():
-                p.data.clamp_(-clip_value, clip_value)
-
-
             self.log("d_loss", d_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
             return d_loss
         
@@ -839,7 +833,7 @@ class WGAN(BaseModel):
                 # uncond random sample
                 z = torch.randn_like(z)
             
-        elif self.stage == "WGAN":
+        elif self.stage == "WGANGP":
             text_emb = self.text_encoder(texts)
             noise = torch.randn((len(lengths), self.noise_dim), device=text_emb.device, dtype=torch.float)
             
@@ -850,6 +844,7 @@ class WGAN(BaseModel):
 
         with torch.no_grad():
             if self.vae_type in ["mld", "vposert", "actor"]:
+                #print('vae decode', z.shape, len(lengths))
                 feats_rst = self.vae.decode(z, lengths)
             elif self.vae_type == "no":
                 feats_rst = z.permute(1, 0, 2)
@@ -1019,7 +1014,7 @@ class WGAN(BaseModel):
                     "lat_t": t2m_rs_set["lat_t"],
                 }
                 
-            elif self.stage=="WGAN":
+            elif self.stage=="WGANGP":
                 rs_set = self.train_gan_forward(batch)
                 
                 # d_loss = gan_rs_set["discriminator_loss"]
@@ -1114,4 +1109,3 @@ class WGAN(BaseModel):
         if split in ["test"]:
             return rs_set["joints_rst"], batch["length"]
         return loss
-
